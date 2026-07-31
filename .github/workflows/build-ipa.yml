@@ -1,0 +1,45 @@
+name: build-ipa
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Generate Xcode project
+        run: xcodegen generate
+
+      # SideStore/AltStore re-signs the app on install, so build unsigned here.
+      - name: Build (unsigned)
+        run: |
+          xcodebuild \
+            -project PocketSSH.xcodeproj \
+            -scheme PocketSSH \
+            -configuration Release \
+            -sdk iphoneos \
+            -derivedDataPath build \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=NO \
+            build
+
+      - name: Package .ipa
+        run: |
+          mkdir -p Payload
+          cp -R build/Build/Products/Release-iphoneos/PocketSSH.app Payload/
+          zip -qry PocketSSH.ipa Payload
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: PocketSSH-ipa
+          path: PocketSSH.ipa
+          if-no-files-found: error
