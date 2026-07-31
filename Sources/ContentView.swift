@@ -1,7 +1,11 @@
 import SwiftUI
 
 struct ContentView: View {
-    @ObservedObject var server: TCPServer
+    @ObservedObject var ssh: SSHServer
+    @ObservedObject var plain: TCPServer
+
+    private var address: String { LocalIPAddress.current() ?? "-" }
+    private var running: Bool { ssh.isRunning || plain.isRunning }
 
     var body: some View {
         NavigationStack {
@@ -19,36 +23,75 @@ struct ContentView: View {
         VStack(spacing: 12) {
             HStack {
                 Circle()
-                    .fill(server.isRunning ? .green : .secondary)
+                    .fill(running ? .green : .secondary)
                     .frame(width: 12, height: 12)
-                Text(server.isRunning ? "待ち受け中" : "停止中")
+                Text(running ? "待ち受け中" : "停止中")
                     .font(.headline)
                 Spacer()
-                Text("接続 \(server.clientCount)")
+                Text("接続 \(plain.clientCount)")
                     .foregroundStyle(.secondary)
                     .monospacedDigit()
             }
 
             Button {
-                server.isRunning ? server.stop() : server.start()
+                if running {
+                    ssh.stop()
+                    plain.stop()
+                } else {
+                    ssh.start()
+                    plain.start()
+                }
             } label: {
-                Text(server.isRunning ? "停止" : "起動")
+                Text(running ? "停止" : "起動")
                     .frame(maxWidth: .infinity)
             }
             .buttonStyle(.borderedProminent)
-            .tint(server.isRunning ? .red : .accentColor)
+            .tint(running ? .red : .accentColor)
         }
         .padding()
         .background(.quaternary.opacity(0.4), in: RoundedRectangle(cornerRadius: 12))
     }
 
     private var connectHint: some View {
-        VStack(alignment: .leading, spacing: 4) {
+        VStack(alignment: .leading, spacing: 8) {
             Text("PCから接続")
                 .font(.subheadline.bold())
-            Text(LocalIPAddress.current().map { "nc \($0) \(server.port)" } ?? "Wi-Fi未接続")
-                .font(.system(.body, design: .monospaced))
-                .textSelection(.enabled)
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text("SSH（ポート \(String(ssh.port))）")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Text("ssh -p \(String(ssh.port)) momo@\(address)")
+                    .font(.system(.body, design: .monospaced))
+                    .textSelection(.enabled)
+            }
+
+            HStack(spacing: 8) {
+                Text("パスワード")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Text(ssh.password)
+                    .font(.system(.body, design: .monospaced).bold())
+                    .textSelection(.enabled)
+                Button {
+                    UIPasteboard.general.string = ssh.password
+                } label: {
+                    Image(systemName: "doc.on.doc")
+                }
+                .buttonStyle(.borderless)
+            }
+
+            Divider()
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text("素のTCP（ポート \(String(plain.port))・認証なし）")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Text("nc \(address) \(String(plain.port))")
+                    .font(.system(.body, design: .monospaced))
+                    .textSelection(.enabled)
+            }
+
             Text("アプリを前面に出している間だけ接続できます。")
                 .font(.caption)
                 .foregroundStyle(.secondary)
@@ -59,10 +102,11 @@ struct ContentView: View {
     }
 
     private var logView: some View {
-        ScrollViewReader { proxy in
+        let lines = (ssh.log + plain.log).sorted()
+        return ScrollViewReader { proxy in
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 2) {
-                    ForEach(Array(server.log.enumerated()), id: \.offset) { index, line in
+                    ForEach(Array(lines.enumerated()), id: \.offset) { index, line in
                         Text(line)
                             .font(.system(.caption, design: .monospaced))
                             .frame(maxWidth: .infinity, alignment: .leading)
@@ -70,7 +114,7 @@ struct ContentView: View {
                     }
                 }
             }
-            .onChange(of: server.log.count) { _, count in
+            .onChange(of: lines.count) { _, count in
                 guard count > 0 else { return }
                 proxy.scrollTo(count - 1, anchor: .bottom)
             }

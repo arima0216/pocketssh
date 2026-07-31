@@ -5,12 +5,32 @@ options:
     iOS: "17.0"
   createIntermediateGroups: true
 
+packages:
+  swift-nio:
+    url: https://github.com/apple/swift-nio.git
+    from: "2.65.0"
+  swift-nio-ssh:
+    url: https://github.com/apple/swift-nio-ssh.git
+    from: "0.9.0"
+  swift-crypto:
+    url: https://github.com/apple/swift-crypto.git
+    from: "3.0.0"
+
 targets:
   PocketSSH:
     type: application
     platform: iOS
     sources:
       - path: Sources
+    dependencies:
+      - package: swift-nio
+        product: NIOCore
+      - package: swift-nio
+        product: NIOPosix
+      - package: swift-nio-ssh
+        product: NIOSSH
+      - package: swift-crypto
+        product: Crypto
     info:
       path: Generated/Info.plist
       properties:
