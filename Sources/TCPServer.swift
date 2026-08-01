@@ -131,7 +131,9 @@ private final class ClientSession {
 
     private let connection: NWConnection
     private let queue: DispatchQueue
-    private var shell = CommandShell()
+    private let shell = CommandShell()
+    /// シェルは PhotoKit の完了待ちで詰まるので専用キューで回す。
+    private let shellQueue = DispatchQueue(label: "dev.momo.pocketssh.tcpshell")
     private var buffer = Data()
 
     init(id: UUID, connection: NWConnection, queue: DispatchQueue) {
@@ -190,16 +192,19 @@ private final class ClientSession {
     }
 
     private func handle(_ line: String) {
-        let result = shell.run(line)
-        if !result.output.isEmpty {
-            send(result.output.hasSuffix("\n") ? result.output : result.output + "\n")
+        shellQueue.async { [weak self] in
+            guard let self else { return }
+            let result = self.shell.run(line)
+            if !result.output.isEmpty {
+                self.send(result.output.hasSuffix("\n") ? result.output : result.output + "\n")
+            }
+            if result.shouldClose {
+                self.send("bye\n")
+                self.connection.cancel()
+                return
+            }
+            self.send(self.shell.prompt())
         }
-        if result.shouldClose {
-            send("bye\n")
-            connection.cancel()
-            return
-        }
-        send(shell.prompt())
     }
 
     private func send(_ text: String) {

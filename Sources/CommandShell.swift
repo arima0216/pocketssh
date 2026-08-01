@@ -5,9 +5,11 @@ import UIKit
 ///
 /// iOSのサンドボックスは fork/posix_spawn を禁止しているため、本物のシェルを
 /// 子プロセスとして起動することはできない。ここではコマンド文字列を解釈して
-/// FileManager などのAPI呼び出しに変換している。
-/// 触れる範囲はアプリ自身のサンドボックス（Documents 以下）に限られる。
-struct CommandShell {
+/// FileManager や PhotoKit などのAPI呼び出しに変換している。
+///
+/// PhotoKit の待ち合わせに semaphore を使うため、`run` は必ず
+/// バックグラウンドキューから呼ぶこと（メインスレッドだとデッドロックする）。
+final class CommandShell {
     struct Result {
         var output: String
         var shouldClose: Bool = false
@@ -24,8 +26,7 @@ struct CommandShell {
 
     func banner() -> String {
         """
-        PocketSSH 0.1.0 — \(UIDevice.current.name)
-        アプリのサンドボックス内だけを見られる疑似シェルです。
+        PocketSSH 0.2.0 — \(UIDevice.current.name)
         help でコマンド一覧、exit で切断。
 
         """
@@ -35,7 +36,7 @@ struct CommandShell {
         "\(displayPath(cwd))$ "
     }
 
-    mutating func run(_ line: String) -> Result {
+    func run(_ line: String) -> Result {
         let parts = line.split(separator: " ").map(String.init)
         guard let command = parts.first else { return Result(output: "") }
         let args = Array(parts.dropFirst())
@@ -58,6 +59,17 @@ struct CommandShell {
             return Result(output: deviceInfo())
         case "date":
             return Result(output: ISO8601DateFormatter().string(from: Date()))
+        case "photos":
+            let limit = args.first.flatMap { Int($0) } ?? 20
+            return Result(output: PhotoLibrary.list(limit: limit))
+        case "photo":
+            guard let index = args.first.flatMap({ Int($0) }) else {
+                return Result(output: "使い方: photo <番号> [最大ピクセル]（photos で番号を確認）")
+            }
+            let maxPixel = args.count > 1 ? (Double(args[1]) ?? 1600) : 1600
+            return Result(output: PhotoLibrary.base64JPEG(index: index,
+                                                          maxPixel: CGFloat(maxPixel),
+                                                          quality: 0.85))
         case "exit", "quit":
             return Result(output: "", shouldClose: true)
         default:
@@ -69,15 +81,17 @@ struct CommandShell {
 
     private func helpText() -> String {
         """
-        help              このヘルプ
-        pwd               現在のディレクトリ
-        ls [パス]         ファイル一覧
-        cd <パス>         ディレクトリ移動
-        cat <ファイル>    ファイルの中身（先頭64KBまで）
-        echo <文字列>     おうむ返し
-        device            端末情報
-        date              現在時刻
-        exit              切断
+        help                 このヘルプ
+        pwd                  現在のディレクトリ
+        ls [パス]            ファイル一覧
+        cd <パス>            ディレクトリ移動
+        cat <ファイル>       ファイルの中身（先頭64KBまで）
+        echo <文字列>        おうむ返し
+        device               端末情報
+        date                 現在時刻
+        photos [件数]        写真を新しい順に一覧（既定20件）
+        photo <番号> [px]    写真をJPEG/Base64で出力（既定 長辺1600px）
+        exit                 切断
         """
     }
 
@@ -102,7 +116,7 @@ struct CommandShell {
             .joined(separator: "\n")
     }
 
-    private mutating func changeDirectory(_ path: String) -> String {
+    private func changeDirectory(_ path: String) -> String {
         let target = resolve(path)
         var isDirectory: ObjCBool = false
         let exists = FileManager.default.fileExists(atPath: target.path, isDirectory: &isDirectory)

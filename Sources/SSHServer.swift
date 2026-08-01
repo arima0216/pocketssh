@@ -197,9 +197,11 @@ private final class SessionHandler: ChannelDuplexHandler {
     typealias OutboundIn = SSHChannelData
     typealias OutboundOut = SSHChannelData
 
-    private var shell = CommandShell()
+    private let shell = CommandShell()
     private var buffer = ""
     private let log: (String) -> Void
+    /// PhotoKit の完了待ちで詰まるので、シェルはイベントループ外で回す。
+    private let queue = DispatchQueue(label: "dev.momo.pocketssh.shell")
 
     init(log: @escaping (String) -> Void) { self.log = log }
 
@@ -211,20 +213,22 @@ private final class SessionHandler: ChannelDuplexHandler {
     }
 
     func userInboundEventTriggered(context: ChannelHandlerContext, event: Any) {
+        let channel = context.channel
         switch event {
         case is SSHChannelRequestEvent.PseudoTerminalRequest:
             // iOSでは本物のTTYを用意できない。拒否するとクライアントは
             // ライン入力モードで動作するため、こちらの方が具合が良い。
             context.fireErrorCaught(SSHError.unsupportedChannel)
         case is SSHChannelRequestEvent.ShellRequest:
-            write(context, shell.banner())
-            write(context, shell.prompt())
+            _ = send(channel, shell.banner() + shell.prompt())
         case let exec as SSHChannelRequestEvent.ExecRequest:
-            let result = shell.run(exec.command)
-            if !result.output.isEmpty {
-                write(context, result.output.hasSuffix("\n") ? result.output : result.output + "\n")
+            let command = exec.command
+            queue.async { [weak self] in
+                guard let self else { return }
+                let result = self.shell.run(command)
+                let text = result.output.isEmpty ? "" : self.terminated(result.output)
+                self.send(channel, text).whenComplete { _ in self.finish(channel) }
             }
-            finish(context)
         default:
             context.fireUserInboundEventTriggered(event)
         }
@@ -236,36 +240,44 @@ private final class SessionHandler: ChannelDuplexHandler {
             return
         }
         buffer += String(buffer: bytes)
+        let channel = context.channel
         while let index = buffer.firstIndex(where: { $0 == "\n" || $0 == "\r" }) {
             let line = String(buffer[buffer.startIndex..<index])
             buffer.removeSubrange(buffer.startIndex...index)
-            handle(context, line: line)
+            handle(channel, line: line)
         }
     }
 
-    private func handle(_ context: ChannelHandlerContext, line: String) {
-        let result = shell.run(line.trimmingCharacters(in: .whitespaces))
-        if !result.output.isEmpty {
-            write(context, result.output.hasSuffix("\n") ? result.output : result.output + "\n")
+    private func handle(_ channel: Channel, line: String) {
+        queue.async { [weak self] in
+            guard let self else { return }
+            let result = self.shell.run(line.trimmingCharacters(in: .whitespaces))
+            var text = result.output.isEmpty ? "" : self.terminated(result.output)
+            if result.shouldClose {
+                text += "bye\n"
+                self.send(channel, text).whenComplete { _ in self.finish(channel) }
+                return
+            }
+            text += self.shell.prompt()
+            _ = self.send(channel, text)
         }
-        if result.shouldClose {
-            write(context, "bye\n")
-            finish(context)
-            return
-        }
-        write(context, shell.prompt())
     }
 
-    private func write(_ context: ChannelHandlerContext, _ text: String) {
+    private func terminated(_ text: String) -> String {
+        text.hasSuffix("\n") ? text : text + "\n"
+    }
+
+    @discardableResult
+    private func send(_ channel: Channel, _ text: String) -> EventLoopFuture<Void> {
+        guard !text.isEmpty else { return channel.eventLoop.makeSucceededVoidFuture() }
         // SSHは改行に CRLF を期待する
         let normalized = text.replacingOccurrences(of: "\n", with: "\r\n")
-        let buffer = context.channel.allocator.buffer(string: normalized)
-        context.writeAndFlush(wrapOutboundOut(SSHChannelData(type: .channel, data: .byteBuffer(buffer))),
-                              promise: nil)
+        let buffer = channel.allocator.buffer(string: normalized)
+        return channel.writeAndFlush(SSHChannelData(type: .channel, data: .byteBuffer(buffer)))
     }
 
-    private func finish(_ context: ChannelHandlerContext) {
-        _ = context.channel.triggerUserOutboundEvent(SSHChannelRequestEvent.ExitStatus(exitStatus: 0))
-            .flatMap { context.channel.close() }
+    private func finish(_ channel: Channel) {
+        _ = channel.triggerUserOutboundEvent(SSHChannelRequestEvent.ExitStatus(exitStatus: 0))
+            .flatMap { channel.close() }
     }
 }

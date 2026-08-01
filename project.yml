@@ -41,6 +41,7 @@ targets:
         UISupportedInterfaceOrientations:
           - UIInterfaceOrientationPortrait
         NSLocalNetworkUsageDescription: PCからこの端末に接続するため、同じWi-Fi内の通信を使用します。
+        NSPhotoLibraryUsageDescription: photos / photo コマンドで写真を一覧・取り出すために使用します。
         NSBonjourServices:
           - _pocketssh._tcp
     settings:
