@@ -4,3 +4,6 @@ build/
 Payload/
 *.ipa
 .DS_Store
+
+.ssh_password
+.askpass.sh
