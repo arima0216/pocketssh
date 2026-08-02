@@ -26,7 +26,7 @@ final class CommandShell {
 
     func banner() -> String {
         """
-        PocketSSH 0.2.0 — \(UIDevice.current.name)
+        PocketSSH 0.3.0 — \(UIDevice.current.name)
         help でコマンド一覧、exit で切断。
 
         """
@@ -70,6 +70,16 @@ final class CommandShell {
             return Result(output: PhotoLibrary.base64JPEG(index: index,
                                                           maxPixel: CGFloat(maxPixel),
                                                           quality: 0.85))
+        case "photoorig":
+            guard let index = args.first.flatMap({ Int($0) }) else {
+                return Result(output: "使い方: photoorig <番号>（photos で番号を確認）")
+            }
+            return Result(output: PhotoLibrary.base64Original(index: index))
+        case "photodelall":
+            guard args.first == "yes" else {
+                return Result(output: "本当に全削除するなら photodelall yes と入力（iPhone側にも確認ダイアログが出ます）")
+            }
+            return Result(output: PhotoLibrary.deleteAllPhotos())
         case "exit", "quit":
             return Result(output: "", shouldClose: true)
         default:
@@ -91,6 +101,8 @@ final class CommandShell {
         date                 現在時刻
         photos [件数]        写真を新しい順に一覧（既定20件）
         photo <番号> [px]    写真をJPEG/Base64で出力（既定 長辺1600px）
+        photoorig <番号>     写真をオリジナル画質のままBase64で出力
+        photodelall yes      写真を全削除（端末側の確認ダイアログが必要）
         exit                 切断
         """
     }
