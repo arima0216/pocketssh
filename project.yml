@@ -35,20 +35,20 @@ targets:
       path: Generated/Info.plist
       properties:
         CFBundleDisplayName: PocketSSH
-        CFBundleShortVersionString: "0.3.0"
-        CFBundleVersion: "2"
+        CFBundleShortVersionString: "0.4.0"
+        CFBundleVersion: "3"
         UILaunchScreen: {}
         UISupportedInterfaceOrientations:
           - UIInterfaceOrientationPortrait
         NSLocalNetworkUsageDescription: PCからこの端末に接続するため、同じWi-Fi内の通信を使用します。
-        NSPhotoLibraryUsageDescription: photos / photo コマンドで写真を一覧・取り出すために使用します。
+        NSPhotoLibraryUsageDescription: photos / photo / videos コマンドで写真・動画を一覧・取り出すために使用します。
         NSBonjourServices:
           - _pocketssh._tcp
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: dev.momo.pocketssh
-        MARKETING_VERSION: "0.3.0"
-        CURRENT_PROJECT_VERSION: "2"
+        MARKETING_VERSION: "0.4.0"
+        CURRENT_PROJECT_VERSION: "3"
         TARGETED_DEVICE_FAMILY: "1"
         SWIFT_VERSION: "5.9"
         GENERATE_INFOPLIST_FILE: "NO"

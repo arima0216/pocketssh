@@ -26,7 +26,7 @@ final class CommandShell {
 
     func banner() -> String {
         """
-        PocketSSH 0.3.0 — \(UIDevice.current.name)
+        PocketSSH 0.4.0 — \(UIDevice.current.name)
         help でコマンド一覧、exit で切断。
 
         """
@@ -53,6 +53,16 @@ final class CommandShell {
         case "cat":
             guard let name = args.first else { return Result(output: "cat: ファイル名が必要です") }
             return Result(output: readFile(name))
+        case "catb64":
+            guard args.count >= 3,
+                  let offset = Int(args[1]),
+                  let length = Int(args[2]) else {
+                return Result(output: "使い方: catb64 <ファイル> <開始バイト> <バイト数>")
+            }
+            return Result(output: readFileBase64(args[0], offset: offset, length: length))
+        case "rm":
+            guard let name = args.first else { return Result(output: "rm: ファイル名が必要です") }
+            return Result(output: removeFile(name))
         case "echo":
             return Result(output: args.joined(separator: " "))
         case "device":
@@ -80,6 +90,26 @@ final class CommandShell {
                 return Result(output: "本当に全削除するなら photodelall yes と入力（iPhone側にも確認ダイアログが出ます）")
             }
             return Result(output: PhotoLibrary.deleteAllPhotos())
+        case "videos":
+            let limit = args.first.flatMap { Int($0) } ?? 20
+            return Result(output: PhotoLibrary.listVideos(limit: limit))
+        case "videothumb":
+            guard let index = args.first.flatMap({ Int($0) }) else {
+                return Result(output: "使い方: videothumb <番号> [最大ピクセル]（videos で番号を確認）")
+            }
+            let maxPixel = args.count > 1 ? (Double(args[1]) ?? 640) : 640
+            return Result(output: PhotoLibrary.videoThumbnailJPEG(index: index,
+                                                                  maxPixel: CGFloat(maxPixel)))
+        case "videosave":
+            guard let index = args.first.flatMap({ Int($0) }) else {
+                return Result(output: "使い方: videosave <番号>（videos で番号を確認）")
+            }
+            return Result(output: PhotoLibrary.saveVideoToDocuments(index: index))
+        case "videodelall":
+            guard args.first == "yes" else {
+                return Result(output: "本当に全削除するなら videodelall yes と入力（iPhone側にも確認ダイアログが出ます）")
+            }
+            return Result(output: PhotoLibrary.deleteAllVideos())
         case "exit", "quit":
             return Result(output: "", shouldClose: true)
         default:
@@ -96,6 +126,9 @@ final class CommandShell {
         ls [パス]            ファイル一覧
         cd <パス>            ディレクトリ移動
         cat <ファイル>       ファイルの中身（先頭64KBまで）
+        catb64 <ファイル> <開始バイト> <バイト数>
+                             ファイルの一部をBase64で出力（1回4MBまで／末尾は EOF）
+        rm <ファイル>        ファイル削除（ディレクトリは不可）
         echo <文字列>        おうむ返し
         device               端末情報
         date                 現在時刻
@@ -103,6 +136,11 @@ final class CommandShell {
         photo <番号> [px]    写真をJPEG/Base64で出力（既定 長辺1600px）
         photoorig <番号>     写真をオリジナル画質のままBase64で出力
         photodelall yes      写真を全削除（端末側の確認ダイアログが必要）
+        videos [件数]        動画を新しい順に一覧（既定20件）
+        videothumb <番号> [px]
+                             動画のサムネイルをJPEG/Base64で出力（既定 長辺640px）
+        videosave <番号>     動画を Documents に書き出し（そのあと catb64 で取り出す）
+        videodelall yes      動画を全削除（端末側の確認ダイアログが必要）
         exit                 切断
         """
     }
@@ -151,6 +189,52 @@ final class CommandShell {
         defer { try? handle.close() }
         let data = (try? handle.read(upToCount: 64 * 1024)) ?? Data()
         return String(data: data, encoding: .utf8) ?? "（テキストではありません: \(data.count) bytes）"
+    }
+
+    /// ファイルの一部を切り出してBase64だけを返す（装飾なしの1行）。
+    ///
+    /// 動画のような大きいファイルをSSH経由で運ぶための分割転送用。PC側は offset を
+    /// ずらしながら呼び、"EOF" が返ったら終わり。
+    private func readFileBase64(_ name: String, offset: Int, length: Int) -> String {
+        let target = resolve(name)
+        guard target.path.hasPrefix(root.path),
+              let handle = try? FileHandle(forReadingFrom: target) else {
+            return "catb64: 開けません: \(name)"
+        }
+        defer { try? handle.close() }
+
+        // 1回で流す量は4MBまでに抑える（メモリと行長の保険）
+        let capped = min(max(length, 0), 4 * 1024 * 1024)
+        guard capped > 0 else { return "EOF" }
+
+        do {
+            try handle.seek(toOffset: UInt64(max(offset, 0)))
+        } catch {
+            return "EOF"
+        }
+        let data = (try? handle.read(upToCount: capped)) ?? Data()
+        if data.isEmpty { return "EOF" }
+        return data.base64EncodedString()
+    }
+
+    private func removeFile(_ name: String) -> String {
+        let target = resolve(name)
+        guard target.path.hasPrefix(root.path) else {
+            return "rm: サンドボックスの外は消せません"
+        }
+        var isDirectory: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: target.path, isDirectory: &isDirectory) else {
+            return "rm: そんなファイルはありません: \(name)"
+        }
+        guard !isDirectory.boolValue else {
+            return "rm: ディレクトリは削除できません: \(name)"
+        }
+        do {
+            try FileManager.default.removeItem(at: target)
+            return "removed: \(target.lastPathComponent)"
+        } catch {
+            return "rm: 削除できませんでした: \(error.localizedDescription)"
+        }
     }
 
     private func deviceInfo() -> String {

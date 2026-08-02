@@ -36,11 +36,23 @@ enum PhotoLibrary {
         return granted
     }
 
-    private static func fetch(limit: Int) -> PHFetchResult<PHAsset> {
+    /// 新しい順に取得する。`limit` が 0 なら全件。
+    ///
+    /// 既定は写真（`.image`）。動画コマンドからは `mediaType: .video` を渡して使い回す。
+    private static func fetch(limit: Int, mediaType: PHAssetMediaType = .image) -> PHFetchResult<PHAsset> {
         let options = PHFetchOptions()
         options.sortDescriptors = [NSSortDescriptor(key: "creationDate", ascending: false)]
         if limit > 0 { options.fetchLimit = limit }
-        return PHAsset.fetchAssets(with: .image, options: options)
+        return PHAsset.fetchAssets(with: mediaType, options: options)
+    }
+
+    /// アセットの実ファイルサイズ（バイト）。取れなければ nil。
+    ///
+    /// `PHAssetResource` の `fileSize` は公開プロパティになっていないので KVC で覗く。
+    private static func fileSize(of asset: PHAsset) -> Int? {
+        let resources = PHAssetResource.assetResources(for: asset)
+        guard let resource = resources.first else { return nil }
+        return resource.value(forKey: "fileSize") as? CLong
     }
 
     // MARK: - コマンド実装
@@ -200,6 +212,181 @@ enum PhotoLibrary {
             return "photodelall: 削除できませんでした: \(failure.localizedDescription)"
         }
         return "photodelall: 削除できませんでした"
+    }
+
+    // MARK: - 動画
+
+    /// 動画を新しい順に一覧する（番号・日時・再生時間・解像度・サイズ）。
+    static func listVideos(limit: Int) -> String {
+        guard waitForAuthorization() else {
+            return "写真へのアクセスが許可されていません（設定→プライバシーとセキュリティ→写真）"
+        }
+        let assets = fetch(limit: limit, mediaType: .video)
+        guard assets.count > 0 else { return "（動画なし）" }
+
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyy-MM-dd HH:mm"
+
+        var lines: [String] = []
+        assets.enumerateObjects { asset, index, _ in
+            let date = asset.creationDate.map { formatter.string(from: $0) } ?? "日時不明"
+            let seconds = Int(asset.duration.rounded())
+            let duration = String(format: "%02d:%02d", seconds / 60, seconds % 60)
+            let size = "\(asset.pixelWidth)x\(asset.pixelHeight)"
+            let megabytes = fileSize(of: asset)
+                .map { String(format: "%.1fMB", Double($0) / 1024.0 / 1024.0) } ?? "?"
+            lines.append(String(format: "%3d  %@  %@  %@  %@",
+                                index, date, duration, size, megabytes))
+        }
+        return lines.joined(separator: "\n")
+    }
+
+    /// 指定インデックスの動画のサムネイル（ポスターフレーム）をJPEG/Base64で返す。
+    ///
+    /// `requestImage` は動画アセットに対しても代表フレームを画像として返してくれるので、
+    /// 写真の `base64JPEG` と同じ手順がそのまま使える。
+    static func videoThumbnailJPEG(index: Int, maxPixel: CGFloat) -> String {
+        guard waitForAuthorization() else {
+            return "写真へのアクセスが許可されていません（設定→プライバシーとセキュリティ→写真）"
+        }
+        let assets = fetch(limit: 0, mediaType: .video)
+        guard index >= 0, index < assets.count else {
+            return "videothumb: 範囲外のインデックス（0〜\(max(assets.count - 1, 0))）"
+        }
+        let asset = assets.object(at: index)
+
+        let options = PHImageRequestOptions()
+        options.isNetworkAccessAllowed = true   // iCloud上の動画も取りに行く
+        options.deliveryMode = .highQualityFormat
+        options.resizeMode = .exact
+        options.isSynchronous = false
+
+        let scale = min(1.0, maxPixel / CGFloat(max(asset.pixelWidth, asset.pixelHeight)))
+        let target = CGSize(width: CGFloat(asset.pixelWidth) * scale,
+                            height: CGFloat(asset.pixelHeight) * scale)
+
+        let semaphore = DispatchSemaphore(value: 0)
+        var image: UIImage?
+        PHImageManager.default().requestImage(for: asset,
+                                              targetSize: target,
+                                              contentMode: .aspectFit,
+                                              options: options) { result, info in
+            // degraded（低解像度の先出し）は無視して本命だけ受け取る
+            let degraded = (info?[PHImageResultIsDegradedKey] as? Bool) ?? false
+            if degraded { return }
+            image = result
+            semaphore.signal()
+        }
+        _ = semaphore.wait(timeout: .now() + 60)
+
+        guard let data = image?.jpegData(compressionQuality: 0.8) else {
+            return "videothumb: サムネイルを取得できませんでした"
+        }
+
+        let encoded = data.base64EncodedString()
+        let date = asset.creationDate.map { ISO8601DateFormatter().string(from: $0) } ?? "?"
+        var body = "-----BEGIN PHOTO-----\n"
+        body += "index: \(index)\ndate: \(date)\nbytes: \(data.count)\n\n"
+        body += wrap(encoded, width: 76)
+        body += "\n-----END PHOTO-----"
+        return body
+    }
+
+    /// 指定インデックスの動画をアプリのDocumentsに書き出す。
+    ///
+    /// 動画はBase64で一気に流すには大きすぎるので、いったんサンドボックスに実体を置いて
+    /// `catb64` でチャンク転送させる。iCloud上にしか実体がない場合はダウンロードが走る。
+    static func saveVideoToDocuments(index: Int) -> String {
+        guard waitForAuthorization() else {
+            return "写真へのアクセスが許可されていません（設定→プライバシーとセキュリティ→写真）"
+        }
+        let assets = fetch(limit: 0, mediaType: .video)
+        guard index >= 0, index < assets.count else {
+            return "videosave: 範囲外のインデックス（0〜\(max(assets.count - 1, 0))）"
+        }
+        let asset = assets.object(at: index)
+
+        // 編集済み動画は .fullSizeVideo 側に実体があることがあるので順に探す
+        let resources = PHAssetResource.assetResources(for: asset)
+        let picked = resources.first(where: { $0.type == .video })
+            ?? resources.first(where: { $0.type == .fullSizeVideo })
+            ?? resources.first
+        guard let resource = picked else {
+            return "videosave: 動画データが見つかりませんでした"
+        }
+
+        // シェルは空白でコマンドを分割するので、ファイル名の空白は潰しておく
+        let original = resource.originalFilename
+            .replacingOccurrences(of: " ", with: "_")
+        let filename = "vid_\(index)_\(original)"
+        let documents = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+        let destination = documents.appendingPathComponent(filename)
+
+        // writeData は既存ファイルがあると失敗するので先に消す
+        if FileManager.default.fileExists(atPath: destination.path) {
+            try? FileManager.default.removeItem(at: destination)
+        }
+
+        let options = PHAssetResourceRequestOptions()
+        options.isNetworkAccessAllowed = true   // iCloud上の動画も取りに行く
+
+        let semaphore = DispatchSemaphore(value: 0)
+        var failure: Error?
+        PHAssetResourceManager.default().writeData(for: resource,
+                                                   toFile: destination,
+                                                   options: options) { error in
+            failure = error
+            semaphore.signal()
+        }
+        // iCloudからのダウンロードが挟まると数分かかることがある
+        if semaphore.wait(timeout: .now() + 300) == .timedOut {
+            return "videosave: 書き出しがタイムアウトしました（iCloudからのダウンロードに失敗した可能性）"
+        }
+
+        if let failure = failure {
+            return "videosave: 書き出せませんでした: \(failure.localizedDescription)"
+        }
+
+        let attributes = try? FileManager.default.attributesOfItem(atPath: destination.path)
+        guard let bytes = (attributes?[.size] as? NSNumber)?.intValue else {
+            return "videosave: 書き出したファイルを確認できませんでした"
+        }
+        return "saved: \(filename)\nbytes: \(bytes)"
+    }
+
+    /// ライブラリ内の動画を全削除する。
+    ///
+    /// 写真版と同じく、端末画面の確認ダイアログをタップするまで完了しない。
+    static func deleteAllVideos() -> String {
+        guard waitForAuthorization() else {
+            return "写真へのアクセスが許可されていません（設定→プライバシーとセキュリティ→写真）"
+        }
+        let assets = PHAsset.fetchAssets(with: .video, options: nil)
+        let count = assets.count
+        guard count > 0 else { return "（動画なし）" }
+
+        let semaphore = DispatchSemaphore(value: 0)
+        var succeeded = false
+        var failure: Error?
+        PHPhotoLibrary.shared().performChanges({
+            PHAssetChangeRequest.deleteAssets(assets as NSFastEnumeration)
+        }, completionHandler: { success, error in
+            succeeded = success
+            failure = error
+            semaphore.signal()
+        })
+        // 端末側の確認ダイアログをユーザーがタップするまで返ってこない
+        if semaphore.wait(timeout: .now() + 180) == .timedOut {
+            return "videodelall: 確認ダイアログの応答がありませんでした（iPhoneの画面を確認してください）"
+        }
+
+        if succeeded {
+            return "\(count)本の動画を削除しました（「最近削除した項目」に30日間残ります）"
+        }
+        if let failure = failure {
+            return "videodelall: 削除できませんでした: \(failure.localizedDescription)"
+        }
+        return "videodelall: 削除できませんでした"
     }
 
     private static func wrap(_ text: String, width: Int) -> String {
